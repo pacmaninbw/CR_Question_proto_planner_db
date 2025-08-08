@@ -1,0 +1,1766 @@
+# About the Project
+
+This is a unit test and a prototype for the database portion of a project that would store the data a combined personal planner software with project planning software in a relational database. It was also a learning experience on how to use C++ to add data to a relational database and retrieve that data from the database.  
+
+As a learning experience it was excellent, I continue to learned a lot about the Boost MySQL library, and many features of modern C++.  
+
+Firsts for me:  
+ - first use of std::any()  
+ - second use of std::format()  
+ - second use of std::chrono::year_month_day  
+ - first use of std::functional (previously I passed functions using the older C style pointer to function).
+ - first use of std::optional
+
+## What the Code Does
+
+The code tests that objects are inserted into a MySQL database by first inserting those objects into tables, then retrieving those objects from the tables and comparing them to the objects that were inserted.
+
+# Development Environment
+
+- Ubuntu 24.04
+- g++ 14
+- CMake 4.01
+- Boost 1.88  
+
+# Code to be Reviewed:  
+
+## Code that couldn't be include due to Code Review size restrictions:  
+The task related classes which I would also like reviewed are too large to include in this question. These are `TaskModel.h`, `TaskModel.cpp`, `TaskDbInterface.h` and `TaskDbInterface.cpp`. The code in `GenericDictionary.h` was [previously reviewed](https://codereview.stackexchange.com/questions/294285/second-try-at-c-20-generic-dictionary-for-enums-and-strings). The code in `CSVReader.h` was copied from an answer to [a question on Stack Overflow](https://stackoverflow.com/questions/1120140/how-can-i-read-and-parse-csv-files-in-c) which was written by another Code Review user.  
+
+
+## commonUtilities.h  
+
+```
+#ifndef COMMONUTILITIES_H_
+#define COMMONUTILITIES_H_
+#include <chrono>
+
+extern std::chrono::year_month_day getTodaysDate();
+extern std::chrono::year_month_day getTodaysDatePlus(unsigned int offset);
+extern std::chrono::year_month_day getTodaysDateMinus(unsigned int offset);
+
+#endif // COMMONUTILITIES_H_
+```
+
+## commonUtilities.cpp  
+
+```
+#include <chrono>
+#include "commonUtilities.h"
+
+std::chrono::year_month_day getTodaysDate()
+{
+    std::chrono::time_point<std::chrono::system_clock> today = std::chrono::system_clock::now();
+    return std::chrono::floor<std::chrono::days>(today);
+}
+
+std::chrono::year_month_day getTodaysDatePlus(unsigned int offset)
+{
+    std::chrono::time_point<std::chrono::system_clock> futureDate = std::chrono::system_clock::now();
+    futureDate += std::chrono::days(offset);
+    return std::chrono::floor<std::chrono::days>(futureDate);
+}
+
+std::chrono::year_month_day getTodaysDateMinus(unsigned int offset)
+{
+    std::chrono::time_point<std::chrono::system_clock> pastDate = std::chrono::system_clock::now();
+    pastDate -= std::chrono::days(offset);
+    return std::chrono::floor<std::chrono::days>(pastDate);
+}
+```
+
+## BoostDBInterfaceCore.h  
+
+```
+#ifndef BOOSTMYSQLDBINTERFACECORE_H_
+#define BOOSTMYSQLDBINTERFACECORE_H_
+
+#include <any>
+#include <boost/asio.hpp>
+#include <boost/mysql.hpp>
+#include <chrono>
+#include "CommandLineParser.h"
+#include <functional>
+#include <string>
+#include <string_view>
+
+namespace NSBA = boost::asio;
+namespace NSBM = boost::mysql;
+
+class BoostDBInterfaceCore
+{
+public:
+    BoostDBInterfaceCore();
+    virtual ~BoostDBInterfaceCore() = default;
+    std::string getAllErrorMessages() const { return errorMessages; };
+
+protected:
+    std::string errorMessages;
+/*
+ * Design decision. While putting the arguments for each select statement into a vector of std::any()
+ * is not the most maintainable or safest way to program, it reduces the number of implementations of
+ * runQueryAsync() where only the function signature and one line of code to call the select function
+ * co-routine differ. This removed more than 200 lines of repetitive code.
+ * Until I can figure out how to pass the results from boost::mysql::with_params() into a function,
+ * this is necessary.
+ */
+    std::vector<std::any> selectStatementWhatArgs;
+    void prepareForRunQueryAsync()
+    {
+        errorMessages.clear();
+        selectStatementWhatArgs.clear();
+    };
+    void appendErrorMessage(std::string newError) { errorMessages.append(newError); };
+
+/*
+ * All calls to runQueryAsync should be implemented within try blocks.
+ */
+    NSBM::results runQueryAsync(std::function<NSBA::awaitable<NSBM::results>(void)>queryFunc);
+/*
+ * Special case, for functions called within another runQueryAsync() execution.
+ */
+    NSBM::results runQueryAsync(std::function<NSBA::awaitable<NSBM::results>(std::size_t)>queryFunc, std::size_t id);
+
+/*
+ * Date converters are located here because they will be used by multiple dependent classes.
+ */
+    NSBM::date convertChronoDateToBoostMySQLDate(std::chrono::year_month_day source)
+    {
+        std::chrono::sys_days tp = source;
+        NSBM::date boostDate(tp);
+        return boostDate;
+    };
+    std::chrono::year_month_day convertBoostMySQLDateToChornoDate(NSBM::date source)
+    {
+        const std::chrono::year year{source.year()};
+        const std::chrono::month month{source.month()};
+        const std::chrono::day day{source.day()};
+        std::chrono::year_month_day converted{year, month, day};
+        return converted;
+    };
+
+protected:
+    NSBM::connect_params dbConnectionParameters;
+    bool verboseOutput;
+};
+
+#endif // BOOSTMYSQLDBINTERFACECORE_H_
+```
+
+## BoostDBInterfaceCore.cpp  
+
+```
+#include <boost/asio.hpp>
+#include <boost/mysql.hpp>
+#include "CommandLineParser.h"
+#include "BoostDBInterfaceCore.h"
+#include <functional>
+#include <iostream>
+
+BoostDBInterfaceCore::BoostDBInterfaceCore()
+: errorMessages{""},
+  verboseOutput{programOptions.verboseOutput}
+{
+    dbConnectionParameters.server_address.emplace_host_and_port(programOptions.mySqlUrl, programOptions.mySqlPort);
+    dbConnectionParameters.username = programOptions.mySqlUser;
+    dbConnectionParameters.password = programOptions.mySqlPassword;
+    dbConnectionParameters.database = programOptions.mySqlDBName;
+}
+
+/*
+ * All calls to runQueryAsync should be implemented within try blocks.
+ */
+NSBM::results BoostDBInterfaceCore::runQueryAsync(std::function<NSBA::awaitable<NSBM::results>(void)> queryFunc)
+{
+    NSBM::results localResult;
+    NSBA::io_context ctx;
+
+    NSBA::co_spawn(
+        ctx, queryFunc(),
+        [&localResult, this](std::exception_ptr ptr, NSBM::results result)
+        {
+            if (ptr)
+            {
+                std::rethrow_exception(ptr);
+            }
+            localResult = std::move(result);
+        }
+    );
+
+    ctx.run();
+
+    return localResult;
+}
+
+NSBM::results BoostDBInterfaceCore::runQueryAsync(
+    std::function<NSBA::awaitable<NSBM::results>(std::size_t)> queryFunc, std::size_t id)
+{
+    NSBM::results localResult;
+    NSBA::io_context ctx;
+
+    NSBA::co_spawn(
+        ctx, queryFunc(id),
+        [&localResult, this](std::exception_ptr ptr, NSBM::results result)
+        {
+            if (ptr)
+            {
+                std::rethrow_exception(ptr);
+            }
+            localResult = std::move(result);
+        }
+    );
+
+    ctx.run();
+
+    return localResult;
+}
+```
+
+## UserModel.h  
+
+```
+#ifndef USERMODEL_H_
+#define USERMODEL_H_
+
+#include <iostream>
+#include <format>
+#include <memory>
+#include <string>
+#include <vector>
+
+class UserModel
+{
+public:
+    struct UserPreferences
+    {
+        std::string startTime;
+        std::string endTime;
+        bool includePriorityInSchedule;
+        bool includeMinorPriorityInSchedule;
+        bool userLetterForMajorPriority;
+        bool separateMajorAndMinorWithDot;
+    };
+
+    UserModel();
+    UserModel(std::string lastIn, std::string firstIn, std::string middleIIn, std::string emailIn="", std::size_t uID=0);
+    ~UserModel() = default;
+
+    bool isInDataBase(){return(userID>0);};
+    void autoGenerateLoginAndPassword();
+    std::string getLastName() const { return lastName;};
+    std::string getFirstName() const { return firstName; };
+    std::string getMiddleInitial() const { return middleInitial; };
+    std::string getEmail() const { return email; };
+    std::string getLoginName() const { return loginName; };
+    std::string getPassword() const { return password; };
+    std::string getStartTime() const { return preferences.startTime; };
+    std::string getEndTime() const { return preferences.endTime; };
+    std::size_t getUserID() const { return userID; };
+    bool isPriorityInSchedule() const { return preferences.includePriorityInSchedule; };
+    bool isMinorPriorityInSchedule() const { return preferences.includeMinorPriorityInSchedule; };
+    bool isUsingLettersForMaorPriority() const { return preferences.userLetterForMajorPriority; };
+    bool isSeparatingPriorityWithDot() const { return preferences.separateMajorAndMinorWithDot; };
+
+    void clearModified() { modified = false; };
+    void setLastName(const std::string& lastNameP);
+    void setFirstName(const std::string& firstNameP);
+    void setMiddleInitial(const std::string& middleinitP);
+    void setEmail(const std::string& emailP);
+    void setLoginName(const std::string& loginNameP);
+    void setPassword(const std::string& passwordP);
+    void setStartTime(const std::string& startTime);
+    void setEndTime(const std::string& endTime);
+    void setPriorityInSchedule(bool inSchedule);
+    void setMinorPriorityInSchedule(bool inSchedule);
+    void setUsingLettersForMaorPriority(bool usingLetters);
+    void setSeparatingPriorityWithDot(bool separate);
+    void setUserID(std::size_t UserID);
+
+    bool operator==(UserModel& other)
+    {
+        return diffUser(other);
+    };
+    bool operator==(std::shared_ptr<UserModel> other)
+    {
+        return diffUser(*other);
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const UserModel& user)
+    {
+        constexpr const char* outFmtStr = "\t{}: {}\n";
+        os << std::format(outFmtStr, "User ID", user.userID);
+        os << std::format(outFmtStr, "Last Name", user.lastName);
+        os << std::format(outFmtStr, "First Name", user.firstName);
+        os << std::format(outFmtStr, "Middle Initial", user.middleInitial);
+        os << std::format(outFmtStr, "Email", user.email);
+        os << std::format(outFmtStr, "Login Name", user.loginName);
+
+        return os;
+    };
+
+private:
+    void createLoginBasedOnUserName(const std::string& lastName,
+        const std::string& firstName,const std::string& middleInitial);
+    bool diffUser(UserModel& other);
+    
+    std::size_t userID;
+    std::string lastName;
+    std::string firstName;
+    std::string middleInitial;
+    std::string email;
+    std::string loginName;
+    std::string password;
+    UserPreferences preferences;
+    bool modified;
+};
+
+using UserModel_shp = std::shared_ptr<UserModel>;
+using UserList = std::vector<UserModel_shp>;
+
+#endif // USERMODEL_H_
+```
+
+## UserModel.cpp  
+
+```
+#include <exception>
+#include "UserModel.h"
+#include <stdexcept>
+#include <string>
+
+UserModel::UserModel()
+: userID{0}, modified{false}
+{
+    preferences.includePriorityInSchedule = true;
+    preferences.includeMinorPriorityInSchedule = true;
+    preferences.userLetterForMajorPriority = true;
+    preferences.separateMajorAndMinorWithDot = false;
+    preferences.startTime = "8:30 AM";
+    preferences.endTime = "5:00 PM";
+}
+
+UserModel::UserModel(std::string lastIn, std::string firstIn, std::string middleIIn, std::string emailIn, std::size_t uID)
+: UserModel()
+{
+    lastName = lastIn;
+    firstName = firstIn;
+    middleInitial = middleIIn;
+    email = emailIn;
+    userID = uID;
+    if (!uID)
+    {
+        modified = true;
+    }
+}
+
+void UserModel::autoGenerateLoginAndPassword()
+{
+    if (loginName.empty() && password.empty())
+    {
+        createLoginBasedOnUserName(lastName, firstName, middleInitial);
+    }
+}
+
+void UserModel::createLoginBasedOnUserName(
+    const std::string& lastName, const std::string& firstName, const std::string& middleInitial)
+{
+    std::string tempLoginName(lastName);
+    tempLoginName += firstName;
+    if (middleInitial.size())
+    {
+        tempLoginName += middleInitial[0];
+    }
+
+    setLoginName(tempLoginName);
+    setPassword(tempLoginName);
+}
+
+void UserModel::setLastName(const std::string &lastNameP)
+{
+    modified = true;
+    lastName = lastNameP;
+}
+
+void UserModel::setFirstName(const std::string &firstNameP)
+{
+    modified = true;
+    firstName = firstNameP;
+}
+
+void UserModel::setMiddleInitial(const std::string &middleinitP)
+{
+    modified = true;
+    middleInitial = middleinitP;
+}
+
+void UserModel::setEmail(const std::string &emailP)
+{
+    modified = true;
+    email = emailP;
+}
+
+void UserModel::setLoginName(const std::string &loginNameP)
+{
+    modified = true;
+    loginName = loginNameP;
+}
+
+void UserModel::setPassword(const std::string &passwordP)
+{
+    modified = true;
+    password = passwordP;
+}
+
+void UserModel::setStartTime(const std::string &startTime)
+{
+    modified = true;
+    preferences.startTime = startTime;
+}
+
+void UserModel::setEndTime(const std::string &endTime)
+{
+    modified = true;
+    preferences.endTime = endTime;
+}
+
+void UserModel::setPriorityInSchedule(bool inSchedule)
+{
+    modified = true;
+    preferences.includePriorityInSchedule = inSchedule;
+}
+
+void UserModel::setMinorPriorityInSchedule(bool inSchedule)
+{
+    modified = true;
+    preferences.includeMinorPriorityInSchedule = inSchedule;
+}
+
+void UserModel::setUsingLettersForMaorPriority(bool usingLetters)
+{
+    modified = true;
+    preferences.userLetterForMajorPriority = usingLetters;
+}
+
+void UserModel::setSeparatingPriorityWithDot(bool separate)
+{
+    modified = true;
+    preferences.separateMajorAndMinorWithDot = separate;
+}
+
+void UserModel::setUserID(std::size_t UserID)
+{
+    modified = true;
+    userID = UserID;
+}
+
+bool UserModel::diffUser(UserModel &other)
+{
+    // Ignore user preferences and password
+    return (userID == other.userID && loginName == other.loginName &&
+        lastName == other.lastName && firstName == other.firstName && middleInitial == other.middleInitial);
+}
+```
+
+## UserDbInterface.h  
+
+```
+#ifndef USERDBINTERFACE_H_
+#define USERDBINTERFACE_H_
+
+#include "CommandLineParser.h"
+#include "BoostDBInterfaceCore.h"
+#include <string_view>
+#include "UserModel.h"
+
+class UserDbInterface : public BoostDBInterfaceCore
+{
+public:
+    UserDbInterface();
+    ~UserDbInterface() = default;
+    std::size_t insert(const UserModel& user);
+    std::size_t insert(UserModel_shp userP) { return insert(*userP); };
+    UserModel_shp getUserByUserID(std::size_t userID);
+    UserModel_shp getUserByFullName(std::string_view lastName, std::string_view firstName, std::string_view middleI);
+    UserModel_shp getUserByEmail(std::string_view emailAddress);
+    UserModel_shp getUserByLoginName(std::string_view loginName);
+    UserModel_shp getUserByLoginAndPassword(std::string_view loginName, std::string_view password);
+    UserList getAllUsers();
+
+private:
+    UserModel_shp processResult(NSBM::results& results);
+    UserList processResults(NSBM::results& results);
+    void processResultRow(NSBM::row_view rv, UserModel_shp newUser);
+    NSBA::awaitable<NSBM::results> coRoSelectUserByID();
+    NSBA::awaitable<NSBM::results> coRoSelectUserByFullName();
+    NSBA::awaitable<NSBM::results> coRoSelectUserByEmailAddress();
+    NSBA::awaitable<NSBM::results> coRoSelectUserByLoginName();
+    NSBA::awaitable<NSBM::results> coRoInsertUser(const UserModel& user);
+    NSBA::awaitable<NSBM::results> coRoSelectAllUsers();
+    NSBA::awaitable<NSBM::results> coRoSelectUserByLoginAndPassword();
+
+/*
+ * The indexes below are based on the following select statement, maintain this order
+ * for any new select statements, add any new field indexes at the end.
+ *  SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+*      "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+*       "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE UserID = {}", userID),
+*/
+private:
+    const std::size_t UserIdIdx = 0;
+    const std::size_t LastNameIdx = 1;
+    const std::size_t FirstNameIdx = 2;
+    const std::size_t MiddleInitialIdx = 3;
+    const std::size_t EmailAddressIdx = 4;
+    const std::size_t LoginNameIdx = 5;
+    const std::size_t PasswordIdx = 6;
+    const std::size_t StartDayIdx = 7;
+    const std::size_t EndDayIdx = 8;
+    const std::size_t PriorityGroupIdx = 9;
+    const std::size_t PriorityIdx = 10;
+    const std::size_t UseLettersIdx = 11;
+    const std::size_t DotSeparationIdx = 12;
+};
+
+#endif // USERDBINTERFACE_H_
+```
+
+## UserDbInterface.cpp  
+
+```
+#include <boost/asio.hpp>
+#include <boost/mysql.hpp>
+#include "CommandLineParser.h"
+#include "BoostDBInterfaceCore.h"
+#include <exception>
+#include <format>
+#include <functional>
+#include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include "UserDbInterface.h"
+#include "UserModel.h"
+#include <utility>
+
+UserDbInterface::UserDbInterface()
+: BoostDBInterfaceCore()
+{
+}
+
+std::size_t UserDbInterface::insert(const UserModel &user)
+{
+    prepareForRunQueryAsync();
+
+    try
+    {
+        NSBA::io_context ctx;
+        NSBM::results localResult;
+
+        NSBA::co_spawn(
+            ctx, coRoInsertUser(user),
+            [&localResult, this](std::exception_ptr ptr, NSBM::results result)
+            {
+                if (ptr)
+                {
+                    std::rethrow_exception(ptr);
+                }
+                localResult = std::move(result);
+            }
+        );
+
+        ctx.run();
+
+        return localResult.last_insert_id();
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::insert : {}", e.what()));
+        return 0;
+    }
+}
+
+UserModel_shp UserDbInterface::getUserByUserID(std::size_t userID)
+{
+    UserModel_shp newUser = nullptr;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        selectStatementWhatArgs.push_back(std::any(userID));
+
+        NSBM::results localResult = runQueryAsync(std::bind(&UserDbInterface::coRoSelectUserByID, this));
+
+        newUser = processResult(localResult);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByUserID : {}", e.what()));
+    }
+    
+    return newUser;
+}
+
+UserModel_shp UserDbInterface::getUserByFullName(std::string_view lastName, std::string_view firstName, std::string_view middleI)
+{
+    UserModel_shp newUser = nullptr;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        selectStatementWhatArgs.push_back(std::any(lastName));
+        selectStatementWhatArgs.push_back(std::any(firstName));
+        selectStatementWhatArgs.push_back(std::any(middleI));
+
+        NSBM::results localResult = runQueryAsync(std::bind(&UserDbInterface::coRoSelectUserByFullName, this));
+
+        newUser = processResult(localResult);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByFullName : {}", e.what()));
+    }
+
+    return newUser;
+}
+
+UserModel_shp UserDbInterface::getUserByEmail(std::string_view emailAddress)
+{
+    UserModel_shp newUser = nullptr;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        selectStatementWhatArgs.push_back(std::any(emailAddress));
+
+        NSBM::results localResult = runQueryAsync(
+            std::bind(&UserDbInterface::coRoSelectUserByEmailAddress, this));
+
+        newUser = processResult(localResult);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByEmail : {}", e.what()));
+    }
+
+    return newUser;
+}
+
+UserModel_shp UserDbInterface::getUserByLoginName(std::string_view loginName)
+{
+    UserModel_shp newUser = nullptr;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        selectStatementWhatArgs.push_back(std::any(loginName));
+
+        NSBM::results localResults = runQueryAsync(std::bind(&UserDbInterface::coRoSelectUserByLoginName, this));
+
+        newUser = processResult(localResults);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByLoginName : {}", e.what()));
+    }
+
+    return newUser;
+}
+
+UserModel_shp UserDbInterface::getUserByLoginAndPassword(std::string_view loginName, std::string_view password)
+{
+    UserModel_shp newUser = nullptr;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        selectStatementWhatArgs.push_back(std::any(loginName));
+        selectStatementWhatArgs.push_back(std::any(password));
+
+        NSBM::results localResult = runQueryAsync(std::bind(&UserDbInterface::coRoSelectUserByLoginAndPassword, this));
+
+        newUser =  processResult(localResult);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByLoginAndPassword : {}", e.what()));
+    }
+
+    return newUser;
+}
+
+
+UserList UserDbInterface::getAllUsers()
+{
+    UserList userList;
+    prepareForRunQueryAsync();
+
+    try
+    {
+        NSBM::results localResult = runQueryAsync(std::bind(&UserDbInterface::coRoSelectAllUsers, this));
+
+        userList = processResults(localResult);
+    }
+
+    catch(const std::exception& e)
+    {
+        appendErrorMessage(std::format("In UserDbInterface::getUserByLoginName : {}", e.what()));
+    }
+
+    return userList;
+}
+/**/
+UserModel_shp UserDbInterface::processResult(NSBM::results& results)
+{
+    if (results.rows().empty())
+    {
+        appendErrorMessage("User not found!");
+        return nullptr;
+    }
+
+    if (results.rows().size() > 1)
+    {
+        appendErrorMessage("Too many users found to process!");
+        return nullptr;
+    }
+
+    UserModel_shp newUser = std::make_shared<UserModel>(UserModel());
+    NSBM::row_view rv = results.rows().at(0);
+    processResultRow(rv, newUser);
+
+    return newUser;
+}
+
+UserList UserDbInterface::processResults(NSBM::results& results)
+{
+    UserList users;
+
+    if (results.rows().empty())
+    {
+        appendErrorMessage("No users found!");
+        return users;
+    }
+
+    for (auto row: results.rows())
+    {
+        UserModel_shp newUser = std::make_shared<UserModel>(UserModel());
+        processResultRow(row, newUser);
+        users.push_back(newUser);
+\
+    }
+    return users;
+}
+
+void UserDbInterface::processResultRow(NSBM::row_view rv, UserModel_shp newUser)
+{
+    newUser->setUserID(rv.at(UserIdIdx).as_uint64());
+    newUser->setLastName(rv.at(LastNameIdx).as_string());
+    newUser->setFirstName(rv.at(FirstNameIdx).as_string());
+    newUser->setMiddleInitial(rv.at(MiddleInitialIdx).as_string());
+    newUser->setEmail(rv.at(EmailAddressIdx).as_string());
+    newUser->setLoginName(rv.at(LoginNameIdx).as_string());
+    newUser->setPassword(rv.at(PasswordIdx).as_string());
+    newUser->setStartTime(rv.at(StartDayIdx).as_string());
+    newUser->setEndTime(rv.at(EndDayIdx).as_string());
+    if (!rv.at(PriorityGroupIdx).is_null())
+    {
+        newUser->setPriorityInSchedule(rv.at(PriorityGroupIdx).as_int64());
+    }
+    if (!rv.at(PriorityIdx).is_null())
+    {
+        newUser->setMinorPriorityInSchedule(rv.at(PriorityIdx).as_int64());
+    }
+    if (!rv.at(UseLettersIdx).is_null())
+    {
+        newUser->setUsingLettersForMaorPriority(rv.at(UseLettersIdx).as_int64());
+    }
+    if (!rv.at(DotSeparationIdx).is_null())
+    {
+        newUser->setSeparatingPriorityWithDot(rv.at(DotSeparationIdx).as_int64());
+    }
+
+    // All the set functions set modified, since this user is new in memory it is not modified.
+    newUser->clearModified();
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectUserByID()
+{
+    std::size_t userID = std::any_cast<std::size_t>(selectStatementWhatArgs[0]);
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        NSBM::with_params("SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE UserID = {}", userID),
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectUserByFullName()
+{
+    std::string_view lastName = std::any_cast<std::string_view>(selectStatementWhatArgs[0]);
+    std::string_view firstName = std::any_cast<std::string_view>(selectStatementWhatArgs[1]);
+    std::string_view middleI = std::any_cast<std::string_view>(selectStatementWhatArgs[2]);
+
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        NSBM::with_params("SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE LastName = {} AND FirstName = {} AND MiddleInitial = {}",
+            lastName, firstName, middleI),
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectUserByEmailAddress()
+{
+    std::string_view emailAddr = std::any_cast<std::string_view>(selectStatementWhatArgs[0]);
+
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        NSBM::with_params("SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE EmailAddress = {}", emailAddr),
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectUserByLoginName()
+{
+    std::string_view loginName = std::any_cast<std::string_view>(selectStatementWhatArgs[0]);
+
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        NSBM::with_params("SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE LoginName = {}", loginName),
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoInsertUser(const UserModel& user)
+{
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    // Boolean values are stored as TINYINT and need to be converted.
+    co_await conn.async_execute(
+        NSBM::with_params("INSERT INTO UserProfile (LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot) VALUES ({0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11})",
+             user.getLastName(), user.getFirstName(), user.getMiddleInitial(), user.getEmail(), user.getLoginName(),
+             user.getPassword(), user.getStartTime(), user.getEndTime(), static_cast<int>(user.isPriorityInSchedule()),
+             static_cast<int>(user.isMinorPriorityInSchedule()), static_cast<int>(user.isUsingLettersForMaorPriority()),
+             static_cast<int>(user.isSeparatingPriorityWithDot())),
+        result
+    );
+
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectAllUsers()
+{
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        "SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile ORDER BY UserID",
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+
+NSBA::awaitable<NSBM::results> UserDbInterface::coRoSelectUserByLoginAndPassword()
+{
+    std::string_view loginName = std::any_cast<std::string_view>(selectStatementWhatArgs[0]);
+    std::string_view password = std::any_cast<std::string_view>(selectStatementWhatArgs[1]);
+
+    NSBM::any_connection conn(co_await NSBA::this_coro::executor);
+
+    co_await conn.async_connect(dbConnectionParameters);
+
+    NSBM::results result;
+
+    co_await conn.async_execute(
+        NSBM::with_params("SELECT UserID, LastName, FirstName, MiddleInitial, EmailAddress, LoginName, "
+            "HashedPassWord, ScheduleDayStart, ScheduleDayEnd, IncludePriorityInSchedule, IncludeMinorPriorityInSchedule, "
+            "UseLettersForMajorPriority, SeparatePriorityWithDot FROM UserProfile WHERE LoginName = {} AND HashedPassWord = {}",
+            loginName, password),
+        result
+    );
+
+    co_await conn.async_close();
+
+    co_return result;
+}
+```
+
+## CommandLineParser.h  
+
+```
+#ifndef COMMAND_LINE_PARSER_H_
+#define COMMAND_LINE_PARSER_H_
+
+#include <expected>
+#include <string>
+
+struct ProgramOptions
+{
+    std::string progName;
+    std::string mySqlUser;
+    std::string mySqlPassword;
+    std::string mySqlUrl;
+    unsigned int mySqlPort;
+    std::string mySqlDBName;
+    std::string userTestDataFile;
+    std::string taskTestDataFile;
+	bool enableExecutionTime = false;
+    bool verboseOutput = false;
+};
+
+enum class CommandLineStatus
+{
+    NoErrors,
+    HelpRequested,
+    HasErrors
+};
+
+auto parseCommandLine(int argc, char* argv[]) -> std::expected<ProgramOptions, CommandLineStatus>;
+
+extern ProgramOptions programOptions;
+
+#endif // COMMAND_LINE_PARSER_H_
+```
+
+## CommandLineParser.cpp
+
+```
+#include <algorithm>
+#include <boost/program_options.hpp>
+#include "CommandLineParser.h"
+#include <expected>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+static std::string simplifyName(char *path)
+{
+	return std::filesystem::path{path ? path : "PhotoResizeTool"}.filename().string();
+}
+
+namespace po = boost::program_options;
+
+static const char optionStarter = '-';
+
+enum class ProgOptStatus
+{
+	NoErrors,
+	MissingArgument
+};
+
+static po::options_description addOptions()
+{
+	po::options_description options("Options and arguments");
+	options.add_options()
+		("help,h", "Show this help message")
+		("mysql-user,u", po::value<std::string>()->required(), "Existing MySQL user with sufficient privilege to insert and query")
+		("mysql-password,p", po::value<std::string>()->required(), "password for the MySQL user")
+		("mysql-URL", po::value<std::string>()->default_value("127.0.0.1"), "IP address for the MySQL server")
+		("mysql-port", po::value<unsigned int>(), "The port value for the MySQL server. A default of 3306 is provided.")
+		("mysql-dbname", po::value<std::string>()->default_value("PlannerTaskScheduleDB"), "The name of the database that contains the tables")
+		("user-data-file", po::value<std::string>()->default_value("testData/userData.txt"), "File path including file name to user test data")
+		("task-data-file", po::value<std::string>()->default_value("testData/planData.txt"), "File path including file name to task test data")
+		("time-tests", "Time the execution of the tests")
+		("verbose", "Output additional information for testing and debugging.")
+	;
+
+	return options;
+}
+
+/*
+ * hasArgument is a workaround for the fact that the boost::program_options
+ * doesn't or can't check to see if the string following an option is another
+ * option. 
+ */
+static auto hasArgument(po::variables_map& inputOptions, const std::string& option) -> 
+	std::expected<std::string, ProgOptStatus>
+{
+	std::string argument("");
+	if (!inputOptions.count(option))
+	{
+		return argument;	// No argument to check
+	}
+
+	argument = inputOptions[option].as<std::string>();
+	po::options_description options = addOptions();
+
+	if (argument[0] == optionStarter)
+	{
+		/*
+		 * Remove any preceeding optionStarter, boost::program_options does not store
+		 * the option start.
+		 */
+		auto startOptionText = std::find_if_not(argument.begin(), argument.end(),
+			[](char c) { return c == optionStarter; });
+		if (startOptionText != argument.end())
+		{
+			if (options.find_nothrow(std::string(startOptionText, argument.end()), true))
+			{
+				std::cerr << "The option \'--" << option << "\' is missing the required argument!\n";
+				return std::unexpected(ProgOptStatus::MissingArgument);
+			}
+		}
+	}
+
+	return argument;
+}
+
+struct ProgOptionValuePair
+{
+	std::string option;
+	std::string *value;
+};
+
+static auto checkOptionsWithStringArguments(po::variables_map& inputOptions) -> 
+	std::expected<ProgramOptions, ProgOptStatus>
+{
+	ProgramOptions progOptions;
+	std::vector<ProgOptionValuePair> optionsAndValuesForArgCheck = 
+	{
+		{"mysql-user", &progOptions.mySqlUser},
+		{"mysql-password", &progOptions.mySqlPassword},
+		{"mysql-URL", &progOptions.mySqlUrl},
+		{"mysql-dbname", &progOptions.mySqlDBName},
+		{"user-data-file", &progOptions.userTestDataFile},
+		{"task-data-file", &progOptions.taskTestDataFile}
+	};
+	ProgOptStatus hasArguments = ProgOptStatus::NoErrors;
+	
+	// Process as many options as possible.
+	for (auto optionToCheck: optionsAndValuesForArgCheck)
+	{
+		const auto argCheck = hasArgument(inputOptions, optionToCheck.option);
+		if (argCheck.has_value())
+		{
+			*optionToCheck.value = *argCheck;
+		}
+		else
+		{
+			hasArguments = (hasArguments == ProgOptStatus::NoErrors)?
+				argCheck.error() : hasArguments;
+		}
+	}
+
+	if (hasArguments != ProgOptStatus::NoErrors)
+	{
+		return std::unexpected(hasArguments);
+	}
+
+	return progOptions;
+}
+
+static auto processProgramOptions(po::variables_map& inputOptions,
+	const std::string& progName) -> std::expected<ProgramOptions, ProgOptStatus>
+{
+	ProgramOptions programOptions;
+
+	programOptions.progName = progName;
+
+	const auto argCheck = checkOptionsWithStringArguments(inputOptions);
+	if (argCheck.has_value())
+	{
+		programOptions = *argCheck;
+	}
+	else
+	{
+		return std::unexpected(argCheck.error());
+	}
+
+	programOptions.mySqlPort = (inputOptions.count("mysql-port")) ?
+			inputOptions["scale-factor"].as<unsigned int>() : 3306;
+
+	if (inputOptions.count("time-tests")) {
+		programOptions.enableExecutionTime = true;
+	}
+
+	if (inputOptions.count("verbose")) {
+		programOptions.verboseOutput = true;
+	}
+
+	return programOptions;
+}
+
+static const int MinArgCount = 3;
+
+static CommandLineStatus usage(const std::string& progName,
+	const po::options_description& options,
+	const std::string errorMessage
+	)
+{
+	std::string usageStr =
+	" :\n\tTest storing and retrieving user profiles and tasks in a MySQL database.\n"
+	"\tThe connection data must be listed with the appropriate flags. Default MySQL\n"
+	"\tIP address is 127.0.0.1 and a default MySQL port 3306 are provided. Default\n"
+	"\tvalues for the user data file name and task data file name are also provided\n"
+;
+	if (errorMessage.length())
+	{
+		std::cerr << errorMessage << "\n";
+		std::cerr << progName << usageStr << "\n" << options << "\n";
+	}
+	else
+	{
+		std::cerr << progName << ":\n" << options << "\n";
+	}
+	return CommandLineStatus::HasErrors;
+}
+
+static CommandLineStatus help(const std::string& progName,
+	const po::options_description& options)
+{
+	std::cerr << progName << options << "\n";
+	return CommandLineStatus::HelpRequested;
+}
+
+auto parseCommandLine(int argc, char* argv[]) -> 
+	std::expected<ProgramOptions, CommandLineStatus>
+{
+	ProgramOptions programOptions;
+	std::string progName = simplifyName(argv[0]);
+	po::options_description options = addOptions();
+
+	if (argc < MinArgCount)
+	{
+		return std::unexpected(usage(progName, options,
+			"Missing MySql User Name and Password"));
+	}
+
+	po::variables_map optionMemory;        
+	try
+	{
+		po::store(po::parse_command_line(argc, argv, options), optionMemory);
+		po::notify(optionMemory);    
+	}
+	/*
+	 * Handle any exceptions thrown by boost::program_options.
+	 */
+	catch(const std::exception& e)
+	{
+		return std::unexpected(usage(progName, options, e.what()));
+	}
+	
+	if (optionMemory.count("help")) {
+		return std::unexpected(help(progName, options));
+	}
+
+	if (const auto progOptions = processProgramOptions(optionMemory, progName); progOptions.has_value())
+	{
+		programOptions = *progOptions;
+	}
+	else
+	{
+		return std::unexpected(usage(progName, options, ""));
+	}
+
+	return programOptions;
+}
+```
+
+## main.cpp  
+
+```
+#include <boost/asio.hpp>
+#include <boost/mysql.hpp>
+#include "CommandLineParser.h"
+#include "commonUtilities.h"
+#include "CSVReader.h"
+#include <exception>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include "TaskDbInterface.h"
+#include "TaskModel.h"
+#include "UserDbInterface.h"
+#include "UserModel.h"
+#include "UtilityTimer.h"
+
+/*
+ * All of the DBInterface classes need access to the programOptions global variable for the
+ * MySQL user name and password, as well as the database name and other connection details.
+ */
+ProgramOptions programOptions;
+
+static bool testGetUserByLoginAndPassword(UserDbInterface& userDBInterface, UserModel_shp insertedUser)
+{
+    std::string_view testName = insertedUser->getLoginName();
+    std::string_view testPassword = insertedUser->getPassword();
+
+    UserModel_shp retrievedUser = userDBInterface.getUserByLoginAndPassword(testName, testPassword);
+    if (retrievedUser)
+    {
+        if (*retrievedUser != *insertedUser)
+        {
+            std::cerr << "Insertion user and retrieved User are not the same. Test FAILED!\nInserted User:\n" <<
+            *insertedUser << "\n" "Retreived User:\n" << *retrievedUser << "\n";
+            return false;
+        }
+    }
+    else
+    {
+        std::cerr << "userDBInterface.getUserByLogin(user->getLoginName()) FAILED!\n" <<
+            userDBInterface.getAllErrorMessages() << "\n";
+        return false;
+    }
+
+    retrievedUser = userDBInterface.getUserByLoginAndPassword(testName, "NotThePassword");
+    if (retrievedUser)
+    {
+        std::cerr << "userDBInterface.getUserByLogin(user->getLoginName()) Found user with fake password!\n";
+        return false;
+    }
+
+    return true;
+}
+
+static bool testGetUserByLoginName(UserDbInterface& userDBInterface, UserModel_shp insertedUser)
+{
+    UserModel_shp retrievedUser = userDBInterface.getUserByLoginName(insertedUser->getLoginName());
+    if (retrievedUser)
+    {
+        if (*retrievedUser == *insertedUser)
+        {
+            return true;
+        }
+        else
+        {
+            std::cerr << "Insertion user and retrieved User are not the same. Test FAILED!\nInserted User:\n" <<
+            *insertedUser << "\n" "Retreived User:\n" << *retrievedUser << "\n";
+            return false;
+        }
+    }
+    else
+    {
+        std::cerr << "userDBInterface.getUserByLogin(user->getLoginName()) FAILED!\n" <<
+            userDBInterface.getAllErrorMessages() << "\n";
+        return false;
+    }
+}
+
+static bool testGetUserByFullName(UserDbInterface& userDBInterface, UserModel_shp insertedUser)
+{
+    UserModel_shp retrievedUser = userDBInterface.getUserByFullName(insertedUser->getLastName(),
+        insertedUser->getFirstName(), insertedUser->getMiddleInitial());
+    if (retrievedUser)
+    {
+        if (*retrievedUser == *insertedUser)
+        {
+            return true;
+        }
+        else
+        {
+            std::cerr << "Insertion user and retrieved User are not the same. Test FAILED!\nInserted User:\n" <<
+            *insertedUser << "\n" "Retreived User:\n" << *retrievedUser << "\n";
+            return false;
+        }
+    }
+    else
+    {
+        std::cerr << "userDBInterface.getUserByFullName() FAILED!\n" <<
+            userDBInterface.getAllErrorMessages() << "\n";
+        return false;
+    }
+}
+static bool testGetAllUsers(UserList userProfileTestData, UserDbInterface& userDbInterface)
+{
+    UserList allUsers = userDbInterface.getAllUsers();
+    bool testPassed = false;
+
+    if ((userProfileTestData.size() == allUsers.size()) &&
+        std::equal(userProfileTestData.begin(), userProfileTestData.end(), allUsers.begin(),
+            [](const UserModel_shp a, const UserModel_shp b) { return *a == *b; }))
+    {
+        testPassed = true;
+    }
+    else
+    {
+        std::clog << "Get All users FAILED! " << allUsers.size() << "\n";
+        if (userProfileTestData.size() != allUsers.size())
+        {
+            std::clog << std::format("Size differs: userProfileTestData.size({}) != llUsers.size({})",
+                userProfileTestData.size(), allUsers.size());
+        }
+        else
+        {
+            for (std::size_t userLisetIdx = 0; userLisetIdx < userProfileTestData.size(); ++userLisetIdx)
+            {
+                if (*userProfileTestData[userLisetIdx] != *allUsers[userLisetIdx])
+                {
+                    std::clog << std::format("Original Data [{}]", userLisetIdx) << "\n" <<
+                        *userProfileTestData[userLisetIdx] << std::format("Database Data [{}]", userLisetIdx) << 
+                        "\n" << *allUsers[userLisetIdx] << "\n";
+                }
+            }
+        }
+    }
+
+    allUsers.clear();
+
+    return testPassed;
+}
+
+static void loadTestUsersFromFile(std::string fileName, UserList& userProfileTestData)
+{
+    std::ifstream userData(fileName);
+    
+    for (auto row: CSVRange(userData))
+    {
+        UserModel_shp userIn = std::make_shared<UserModel>(UserModel());
+        userIn->setLastName(row[0]);
+        userIn->setFirstName(row[1]);
+        userIn->setMiddleInitial(row[2]);
+        userIn->setEmail(row[3]);
+        userIn->autoGenerateLoginAndPassword();
+        userProfileTestData.push_back(userIn);
+    }
+}
+
+static bool loadUserProfileTestDataIntoDatabase()
+{
+    // Test one case of the alternate constructor.
+    UserList userProfileTestData = {{std::make_shared<UserModel>("PacMan", "IN", "BW", "pacmaninbw@gmail.com")}};
+    loadTestUsersFromFile(programOptions.userTestDataFile, userProfileTestData);
+
+    UserDbInterface userDBInterface;
+    bool allTestsPassed = true;
+
+    for (auto user: userProfileTestData)
+    {
+        std::size_t userID = userDBInterface.insert(user);
+        user->setUserID(userID);
+        if (!userID)
+        {
+            std::cerr << userDBInterface.getAllErrorMessages() << "\n" << *user << "\n";
+            allTestsPassed = false;
+        }
+        else
+        {
+            if (user->isInDataBase())
+            {
+                if (!testGetUserByLoginName(userDBInterface, user))
+                {
+                    allTestsPassed = false;
+                }
+
+                if (!testGetUserByLoginAndPassword(userDBInterface, user))
+                {
+                    allTestsPassed = false;
+                }
+
+                if (!testGetUserByFullName(userDBInterface, user))
+                {
+                    allTestsPassed = false;
+                }
+            }
+            else
+            {
+                std::clog << "Primary key for user: " << user->getLastName() << ", " << user->getFirstName() << " not set!\n";
+                if (programOptions.verboseOutput)
+                {
+                    std::clog << *user << "\n\n";
+                }
+                allTestsPassed = false;
+            }
+        }
+    }
+
+    if (allTestsPassed)
+    {
+        allTestsPassed = testGetAllUsers(userProfileTestData, userDBInterface);
+    }
+
+    userProfileTestData.clear();
+
+    if (allTestsPassed)
+    {
+        std::clog << "Insertion and retrieval of users test PASSED!\n";
+        return true;
+    }
+    else
+    {
+        std::cerr << "Some or all insertion and retrieval of users test FAILED!\n";
+        return false;
+    }
+}
+
+static bool testGetTaskByDescription(TaskDbInterface& taskDBInterface, TaskModel& task, UserModel& user , bool verboseOutput)
+{
+    TaskModel_shp testInDB = taskDBInterface.getTaskByDescriptionAndAssignedUser(task.getDescription(), user);
+    if (testInDB)
+    {
+        if (*testInDB == task)
+        {
+            return true;
+        }
+        else
+        {
+            std::clog << "Inserted and retrieved Task are not the same! Test FAILED!\n";
+            if (verboseOutput)
+            {
+                std::clog << "Inserted Task:\n" << task << "\n" "Retreived Task:\n" << *testInDB << "\n";
+            }
+            return false;
+        }
+    }
+    else
+    {
+        std::cerr << "userDBInterface.getTaskByDescription(task.getDescription())) FAILED!\n" 
+            << taskDBInterface.getAllErrorMessages() << "\n";
+        return false;
+    }
+}
+
+static bool testGetTaskByID(TaskDbInterface& taskDBInterface, TaskModel& task, bool verboseOutput)
+{
+    TaskModel_shp testInDB = taskDBInterface.getTaskByTaskID(task.getTaskID());
+    if (testInDB)
+    {
+        if (*testInDB == task)
+        {
+            return true;
+        }
+        else
+        {
+            std::clog << "Inserted and retrieved Task are not the same! Test FAILED!\n";
+            if (verboseOutput)
+            {
+                std::clog << "Inserted Task:\n" << task << "\n" "Retreived Task:\n" << *testInDB << "\n";
+            }
+            return false;
+        }
+    }
+    else
+    {
+        std::cerr << "userDBInterface.getTaskByDescription(task.getTaskByTaskID())) FAILED!\n" 
+            << taskDBInterface.getAllErrorMessages() << "\n";
+        return false;
+    }
+}
+
+static bool testGetUnstartedTasks(TaskDbInterface& taskDBInterface, UserModel_shp assigned, bool verboseOutput)
+{
+    TaskList notStartedList = taskDBInterface.getUnstartedDueForStartForAssignedUser(assigned);
+    if (!notStartedList.empty())
+    {
+        std::clog << std::format("Find unstarted tasks for user({}) PASSED!\n", assigned->getUserID());
+        
+        if (verboseOutput)
+        {
+            std::clog << std::format("User {} has {} unstarted tasks\n",
+                assigned->getUserID(), notStartedList.size());
+            for (auto task: notStartedList)
+            {
+                std::clog << *task << "\n";
+            }
+        }
+        return true; 
+    }
+
+    std::cerr << std::format("taskDBInterface.getUnstartedDueForStartForAssignedUser({}) FAILED!\n", assigned->getUserID()) <<
+        taskDBInterface.getAllErrorMessages() << "\n";
+
+    return false;
+}
+
+struct UserTaskTestData
+{
+    char majorPriority;
+    unsigned int minorPriority;
+    std::string description;
+    std::string dueDate;
+    unsigned int estimatedEffortHours;
+    double actualEffortHours;
+    std::size_t parentTask;
+    std::string dependencies;
+    std::string status;
+    std::string scheduledStartDate;
+    std::string actualStartDate;
+    std::string createdDate;
+    std::string dueDate2;
+    std::string estimatedCompletionDate;
+};
+
+static std::chrono::year_month_day stringToDate(std::string dateString)
+{
+    std::chrono::year_month_day dateValue = getTodaysDate();
+
+    // First try the ISO standard date.
+    std::istringstream ss(dateString);
+    ss >> std::chrono::parse("%Y-%m-%d", dateValue);
+    if (!ss.fail())
+    {
+        return dateValue;
+    }
+
+    // The ISO standard didn't work, try some local dates
+    std::locale usEnglish("en_US.UTF-8");
+    std::vector<std::string> legalFormats = {
+        {"%B %d, %Y"},
+        {"%m/%d/%Y"},
+        {"%m-%d-%Y"}
+    };
+
+    ss.imbue(usEnglish);
+    for (auto legalFormat: legalFormats)
+    {
+        ss >> std::chrono::parse(legalFormat, dateValue);
+        if (!ss.fail())
+        {
+            return dateValue;
+        }
+    }
+
+    return dateValue;
+}
+
+static std::vector<UserTaskTestData> loadTasksFromDataFile(std::string taskFileName)
+{
+    std::vector<UserTaskTestData> inputTaskData;
+
+    std::ifstream taskDataFile(taskFileName);
+    
+    for (auto row: CSVRange(taskDataFile))
+    {
+        UserTaskTestData currentTask;
+        currentTask.majorPriority = row[0][0];
+        currentTask.minorPriority = std::stoi(row[1]);
+        currentTask.description = row[2];
+        currentTask.dueDate = row[3];
+        currentTask.estimatedEffortHours = std::stoi(row[4]);
+        currentTask.actualEffortHours = std::stod(row[5]);
+        currentTask.parentTask = std::stoi(row[6]);
+        currentTask.status = row[7];
+        currentTask.scheduledStartDate = row[8];
+        currentTask.actualStartDate = row[9];
+        currentTask.createdDate = row[10];
+        currentTask.dueDate2 = row[11];
+        if (row.size() > 12)
+        {
+            currentTask.estimatedCompletionDate = row[12];
+        }
+
+        inputTaskData.push_back(currentTask);
+    }
+
+    return inputTaskData;
+}
+
+static void commonTaskInit(TaskModel_shp newTask, const UserTaskTestData taskData)
+{
+    // Required fields first.
+    newTask->setEstimatedEffort(taskData.estimatedEffortHours);
+    newTask->setActualEffortToDate(taskData.actualEffortHours);
+    newTask->setDueDate(stringToDate(taskData.dueDate));
+    newTask->setScheduledStart(stringToDate(taskData.scheduledStartDate));
+    newTask->setStatus(taskData.status);
+    newTask->setPriorityGroup(taskData.majorPriority);
+    newTask->setPriority(taskData.minorPriority);
+    newTask->setPercentageComplete(0.0);
+
+    // Optional fields
+    if (taskData.parentTask)
+    {
+        newTask->setParentTaskID(taskData.parentTask);
+    }
+    if (!taskData.actualStartDate.empty())
+    {
+        newTask->setactualStartDate(stringToDate(taskData.actualStartDate));
+    }
+    if (!taskData.estimatedCompletionDate.empty())
+    {
+        newTask->setEstimatedCompletion(stringToDate(taskData.estimatedCompletionDate));
+    }
+    if (!taskData.createdDate.empty())
+    {
+        // Override the auto date creation with the actual creation date.
+        newTask->setCreationDate(stringToDate(taskData.createdDate));
+    }
+}
+
+static TaskModel_shp creatOddTask(const UserModel_shp userOne, const UserTaskTestData taskData)
+{
+    TaskModel_shp newTask = std::make_shared<TaskModel>(userOne, taskData.description);
+    commonTaskInit(newTask, taskData);
+
+    return newTask;
+}
+
+static TaskModel_shp creatEvenTask(const UserModel_shp userOne, const UserTaskTestData taskData)
+{
+    TaskModel_shp newTask = std::make_shared<TaskModel>(userOne);
+    newTask->setDescription(taskData.description);
+    commonTaskInit(newTask, taskData);
+
+    return newTask;
+}
+
+static bool loadUserTaskestDataIntoDatabase()
+{
+    UserDbInterface userDbInterface;
+    UserModel_shp userOne = userDbInterface.getUserByUserID(1);
+    if (!userOne)
+    {
+        std::cerr << "Failed to retrieve userOne from DataBase!\n";
+        return false;
+    }
+
+    TaskDbInterface taskDBInterface;
+    bool allTestsPassed = true;
+    std::size_t lCount = 0;
+    std::vector<UserTaskTestData> userTaskTestData = loadTasksFromDataFile(programOptions.taskTestDataFile);
+
+    for (auto taskTestData: userTaskTestData)
+    {
+        // Try both constructors on an alternating basis.
+        TaskModel_shp testTask = (lCount & 0x000001)? creatOddTask(userOne, taskTestData) :
+            creatEvenTask(userOne, taskTestData);
+        testTask->setTaskID(taskDBInterface.insert(testTask));
+
+        if (testTask->isInDatabase())
+        {
+            if (!testGetTaskByID(taskDBInterface, *testTask, programOptions.verboseOutput))
+            {
+                allTestsPassed = false;
+            }
+
+            if (!testGetTaskByDescription(taskDBInterface, *testTask, *userOne, programOptions.verboseOutput))
+            {
+                allTestsPassed = false;
+            }
+        }
+        else
+        {
+            std::cerr << taskDBInterface.getAllErrorMessages() << *testTask << "\n";
+            std::clog << "Primary key for task: " << testTask->getTaskID() << ", " << testTask->getDescription() <<
+            " not set!\n";
+            if (programOptions.verboseOutput)
+            {
+                std::clog << *testTask << "\n\n";
+            }
+            allTestsPassed = false;
+        }
+        ++lCount;
+    }
+
+    if (allTestsPassed)
+    {
+        allTestsPassed = testGetUnstartedTasks(taskDBInterface, userOne, programOptions.verboseOutput);
+    }
+
+    if (allTestsPassed)
+    {
+        std::clog << "All Task insertions and retrival tests PASSED\n";
+    }
+    else
+    {
+        std::clog << "Some or all Task related tests FAILED!\n";
+    }
+
+    return allTestsPassed;
+}
+
+int main(int argc, char* argv[])
+{
+    try {
+		if (const auto progOptions = parseCommandLine(argc, argv); progOptions.has_value())
+		{
+			programOptions = *progOptions;
+            UtilityTimer stopWatch;
+            if (loadUserProfileTestDataIntoDatabase())
+            {
+                if (!loadUserTaskestDataIntoDatabase())
+                {
+                    return EXIT_FAILURE;
+                }
+            }
+            else
+            {
+                return EXIT_FAILURE;
+            }
+            std::clog << "All tests Passed\n";
+			if (programOptions.enableExecutionTime)
+			{
+                stopWatch.stopTimerAndReport("Testing of Insertion and retrieval of users and tasks in MySQL database\n");
+			}
+        }
+        else
+		{
+			if (progOptions.error() != CommandLineStatus::HelpRequested)
+			{
+				return EXIT_FAILURE;
+			}
+		}
+    } catch (const std::exception& err) {
+        std::cerr << "Error: " << err.what() << "\n";
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+```
