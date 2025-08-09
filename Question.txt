@@ -11,6 +11,7 @@ Firsts for me:
  - first use of std::functional (previously I passed functions using the older C style pointer to function).
  - first use of std::optional
 
+This is my second attempt to implement this test, you can find the [first attempt here](https://codereview.stackexchange.com/questions/297856/my-first-attempt-to-insert-and-retrieve-data-from-a-mysql-database-using-the-boo).
 ## What the Code Does
 
 The code tests that objects are inserted into a MySQL database by first inserting those objects into tables, then retrieving those objects from the tables and comparing them to the objects that were inserted.
@@ -25,8 +26,14 @@ The code tests that objects are inserted into a MySQL database by first insertin
 # Code to be Reviewed:  
 
 ## Code that couldn't be include due to Code Review size restrictions:  
-The task related classes which I would also like reviewed are too large to include in this question. These are `TaskModel.h`, `TaskModel.cpp`, `TaskDbInterface.h` and `TaskDbInterface.cpp`. The code in `GenericDictionary.h` was [previously reviewed](https://codereview.stackexchange.com/questions/294285/second-try-at-c-20-generic-dictionary-for-enums-and-strings). The code in `CSVReader.h` was copied from an answer to [a question on Stack Overflow](https://stackoverflow.com/questions/1120140/how-can-i-read-and-parse-csv-files-in-c) which was written by another Code Review user.  
+The task related classes which I would also like reviewed are too large to include in this question. These are `TaskModel.h`, `TaskModel.cpp`, `TaskDbInterface.h` and `TaskDbInterface.cpp`.  
 
+The code in `GenericDictionary.h` was [previously reviewed](https://codereview.stackexchange.com/questions/294285/second-try-at-c-20-generic-dictionary-for-enums-and-strings).  
+
+The code in `CSVReader.h` was copied from an answer to [a question on Stack Overflow](https://stackoverflow.com/questions/1120140/how-can-i-read-and-parse-csv-files-in-c) which was written by another Code Review user.  
+
+## The Code:  
+All the code necessary to build the test can be found in the [GitHub repository](https://github.com/pacmaninbw/CR_Question_proto_planner_db) along with the CMake files necessary to build it, and the data to test it.  
 
 ## commonUtilities.h  
 
